@@ -171,3 +171,5 @@ cython_debug/
 .pypirc
 
 data/
+saved_items_data.pkl
+saved_features.pt

@@ -125,7 +125,7 @@ else:
     print(f"Extracted and saved features for {len(df_items)} items.")
 
 # ------------------------------------------------------------------------------
-# STEP 2: SYNTHETIC PURCHASE DATA GENERATION
+# STEP 2: SYNTHETIC PURCHASE DATA GENERATION WITH TRENDY PREFERENCES & POPULARITY
 # ------------------------------------------------------------------------------
 
 # Define date range for synthetic purchases (all dates in 2024)
@@ -135,41 +135,86 @@ days_range = (end_date - start_date).days
 
 synthetic_data = []
 
+# 1. Pre-generate a trendy preference for each user (static during 2024)
+user_trendy_preferences = {user_id: random.random() for user_id in range(1, num_customers + 1)}
+
+# 2. Initialize item popularity dictionary (dummy initialization)
+# Each item's initial popularity is set to a random integer between 0 and 5.
+popularity_dict = {item_id: random.randint(0, 5) for item_id in df_items['item_id'].unique()}
+
+# For each user, generate a series of purchases
 for user_id in range(1, num_customers + 1):
-    num_purchases = random.randint(0, max_purchases_per_customer)
-    if num_purchases > 0:
-        # First purchase: sample from all items to set the user's gender
-        first_purchase = df_items.sample(1).iloc[0]
-        first_gender = first_purchase['gender']
-        # Filter items by the chosen gender
+    # Decide number of purchases (ensuring at least 1 purchase)
+    num_purchases = random.randint(1, max_purchases_per_customer)
+    trendy_pref = user_trendy_preferences[user_id]
+    
+    # First purchase: sample from all items to set the user's gender
+    first_purchase = df_items.sample(1).iloc[0]
+    first_gender = first_purchase['gender']
+    random_day_offset = random.randint(0, days_range)
+    purchase_date = start_date + timedelta(days=random_day_offset)
+    synthetic_data.append({
+        'user_id': user_id,
+        'item_id': first_purchase['item_id'],
+        'category': first_purchase['category'],
+        'gender': first_gender,
+        'day': purchase_date.day,
+        'month': purchase_date.month
+    })
+    # Update popularity for the first purchased item.
+    popularity_dict[first_purchase['item_id']] += 1
+
+    # For subsequent purchases, use popularity and trendy preference
+    if num_purchases > 1:
+        # Filter candidate items by the user's gender.
         user_items_pool = df_items[df_items["gender"] == first_gender]
-        for _ in range(num_purchases):
-            random_item = user_items_pool.sample(1).iloc[0]
-            item_id = random_item['item_id']
-            category = random_item['category']
-            gender = random_item['gender']
+        for _ in range(num_purchases - 1):
+            # Compute total popularity and set threshold (15% of total popularity)
+            total_pop = sum(popularity_dict.values())
+            threshold = 0.15 * total_pop
+            
+            # Split items into popular and non-popular based on the threshold.
+            popular_items = user_items_pool[user_items_pool['item_id'].apply(lambda x: popularity_dict.get(x, 0) >= threshold)]
+            non_popular_items = user_items_pool[user_items_pool['item_id'].apply(lambda x: popularity_dict.get(x, 0) < threshold)]
+            
+            # Based on the user's trendy preference, decide from which pool to pick:
+            if random.random() < trendy_pref:
+                # With probability equal to trendy_pref, pick from popular items if available
+                if not popular_items.empty:
+                    chosen_item = popular_items.sample(1).iloc[0]
+                else:
+                    chosen_item = non_popular_items.sample(1).iloc[0]
+            else:
+                # Otherwise, pick from non-popular items if available
+                if not non_popular_items.empty:
+                    chosen_item = non_popular_items.sample(1).iloc[0]
+                else:
+                    chosen_item = popular_items.sample(1).iloc[0]
+            
             random_day_offset = random.randint(0, days_range)
             purchase_date = start_date + timedelta(days=random_day_offset)
             synthetic_data.append({
                 'user_id': user_id,
-                'item_id': item_id,
-                'category': category,
-                'gender': gender,
+                'item_id': chosen_item['item_id'],
+                'category': chosen_item['category'],
+                'gender': chosen_item['gender'],
                 'day': purchase_date.day,
                 'month': purchase_date.month
             })
+            # Update the popularity count for the chosen item.
+            popularity_dict[chosen_item['item_id']] += 1
 
+# Save the synthetic purchase history to CSV
 df_synthetic = pd.DataFrame(synthetic_data)
 df_synthetic.to_csv('data.csv', index=False)
 print("Synthetic purchase history saved to 'data.csv'.")
 
-# Filter category sets for MEN and WOMEN
+# Optionally, extract category sets for MEN and WOMEN
 categories_men = set(df_synthetic[df_synthetic['gender'] == 'MEN']['category'])
 categories_women = set(df_synthetic[df_synthetic['gender'] == 'WOMEN']['category'])
 
-
 # ------------------------------------------------------------------------------
-# STEP 3: TOP-K SIMILARITY CALCULATION USING COSINE SIMILARITY
+# STEP 3: TOP-K SIMILARITY CALCULATION USING COSINE SIMILARITY WITH POPULARITY FUSION
 # ------------------------------------------------------------------------------
 
 # Choose a user to analyze (e.g., user_id = 1)
@@ -192,23 +237,50 @@ else:
     
     recommendations = {}
     
+    # Get the user's trendy preference from our pre-generated dictionary
+    user_trend = user_trendy_preferences[user_id_to_analyze]
+    
     for purchased_item in user_purchased_ids:
         purchased_feature = features_dict[purchased_item]
-        similarities = []
+        candidates = []
+        # Compute visual similarity and retrieve candidate popularity for each candidate
         for candidate in candidate_items:
             candidate_feature = features_dict[candidate]
-            # Compute cosine similarity (higher is more similar)
+            # Compute cosine similarity
             cos_sim = F.cosine_similarity(purchased_feature.unsqueeze(0),
                                           candidate_feature.unsqueeze(0),
                                           dim=1).item()
-            similarities.append((candidate, cos_sim))
-        # Sort by descending cosine similarity and take top_k
-        similarities.sort(key=lambda x: x[1], reverse=True)
-        recommendations[purchased_item] = similarities[:top_k]
+            # Retrieve popularity for the candidate
+            pop = popularity_dict.get(candidate, 0)
+            candidates.append((candidate, cos_sim, pop))
+        
+        # Sort candidates by descending visual similarity and take top_k
+        candidates.sort(key=lambda x: x[1], reverse=True)
+        top_candidates = candidates[:top_k]
+        
+        # Normalize popularity scores for these top_candidates
+        pops = [pop for _, _, pop in top_candidates]
+        min_pop, max_pop = min(pops), max(pops)
+        def normalize(pop):
+            if max_pop != min_pop:
+                return (pop - min_pop) / (max_pop - min_pop)
+            else:
+                return 1.0
+        
+        # Fuse scores: weighted linear combination based on user's trendy preference
+        fused_candidates = []
+        for candidate, vis_sim, pop in top_candidates:
+            norm_pop = normalize(pop)
+            final_score = (1 - user_trend) * vis_sim + user_trend * norm_pop
+            fused_candidates.append((candidate, final_score))
+        
+        # Re-rank top candidates based on the fused final score
+        fused_candidates.sort(key=lambda x: x[1], reverse=True)
+        recommendations[purchased_item] = fused_candidates
     
-    # Display recommendations for each purchased item
-    print(f"\nTop-{top_k} recommendations for user {user_id_to_analyze}:")
+    # Display the final re-ranked recommendations for each purchased item
+    print(f"\nFinal Top-{top_k} recommendations for user {user_id_to_analyze} after popularity fusion:")
     for item, recs in recommendations.items():
         print(f"\nFor purchased item {item}:")
-        for candidate, sim in recs:
-            print(f"   Candidate: {candidate} with cosine similarity {sim:.4f}")
+        for candidate, final_score in recs:
+            print(f"   Candidate: {candidate} with fused score {final_score:.4f}")
