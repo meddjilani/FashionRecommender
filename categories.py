@@ -19,4 +19,4 @@ for file in files:
 categories_series = pd.Series(categories)
 unique_categories = categories_series.unique()
 
-print("Unique categories:", len(unique_categories))
+print("Unique categories:", unique_categories)
