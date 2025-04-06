@@ -14,6 +14,7 @@ from torchvision import transforms
 from PIL import Image
 import torch.nn.functional as F
 from tqdm import tqdm
+import argparse
 
 # ------------------------------------------------------------------------------
 # CONFIGURATION & SETUP
@@ -23,16 +24,33 @@ from tqdm import tqdm
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Set up argument parser
+def parse_args():
+    parser = argparse.ArgumentParser(description="Configuration for Fashion Recommender")
+
+    # Add arguments for configurable parameters
+    parser.add_argument('--seed', type=int, default=42, help="Random seed for reproducibility")
+    parser.add_argument('--num_customers', type=int, default=50, help="Number of customers to simulate")
+    parser.add_argument('--max_purchases_per_customer', type=int, default=5, help="Maximum (average) purchase count per customer")
+    parser.add_argument('--top_k', type=int, default=5, help="Top K similar items to retrieve per purchased item")
+    parser.add_argument('--train_folder', type=str, default="/mnt/isilon/maliousalah/FashionRecommender/data/datasets/train_images", help="Path to training images folder")
+
+    return parser.parse_args()
+
+# Parse arguments
+args = parse_args()
+
+
 # Set random seeds for reproducibility
-SEED = 42
+SEED = args.seedDEVICE
 random.seed(SEED)
 np.random.seed(SEED)
 torch.manual_seed(SEED)
 
 # PARAMETERS
-NUM_CUSTOMERS = 50              # Number of customers to simulate
-MAX_PURCHASES_PER_CUSTOMER = 5  # Maximum (average) purchase count per customer
-TOP_K = 5                       # Top K similar items to retrieve per purchased item
+NUM_CUSTOMERS = args.num_customers             # Number of customers to simulate
+MAX_PURCHASES_PER_CUSTOMER = args.max_purchases_per_customer  # Maximum (average) purchase count per customer
+TOP_K = args.top_k                            # Top K similar items to retrieve per purchased item
 
 # List of backbones to try
 BACKBONES = ['resnet50', 'densenet121', 'vgg16']
@@ -45,7 +63,7 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 logger.info("Using device: %s", DEVICE)
 
 # Data paths
-TRAIN_FOLDER = pathlib.Path("/mnt/isilon/maliousalah/FashionRecommender/data/datasets/train_images")
+TRAIN_FOLDER = pathlib.Path(args.train_folder)
 ITEMS_DATA_PATH = pathlib.Path("saved_items_data.pkl")
 
 # ------------------------------------------------------------------------------
