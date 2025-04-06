@@ -42,7 +42,7 @@ args = parse_args()
 
 
 # Set random seeds for reproducibility
-SEED = args.seedDEVICE
+SEED = args.seed
 random.seed(SEED)
 np.random.seed(SEED)
 torch.manual_seed(SEED)
