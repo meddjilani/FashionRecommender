@@ -334,8 +334,11 @@ def generate_synthetic_purchase_data(df_items: pd.DataFrame, num_customers: int 
                 popularity_dict[chosen_item['item_id']] += 1
 
     df_synthetic = pd.DataFrame(synthetic_data)
-    df_synthetic.to_csv('data.csv', index=False)
+    df_synthetic.to_csv('utils/data.csv', index=False)
     logger.info("Synthetic purchase history saved to 'data.csv'.")
+    with open('utils/popularity_dict.pkl', 'wb') as f:
+        pickle.dump(popularity_dict, f)
+    logger.info("Popularity dictionary  saved to 'popularity_dict.pkl'.")
     return df_synthetic, popularity_dict
 
 def compute_recommendations(user_id: int, df_synthetic: pd.DataFrame, df_items: pd.DataFrame,
