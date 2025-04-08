@@ -33,6 +33,12 @@ def parse_args():
     parser.add_argument('--num_customers', type=int, default=50, help="Number of customers to simulate")
     parser.add_argument('--max_purchases_per_customer', type=int, default=5, help="Maximum (average) purchase count per customer")
     parser.add_argument('--top_k', type=int, default=5, help="Top K similar items to retrieve per purchased item")
+    parser.add_argument('--P_max', type=int, default=100, help="Maximum number of purchases for a given item")
+    parser.add_argument('--P_threshold', type=int, default=0.15, help="threshold to divide popular items from non popular items")
+    parser.add_argument('--Penalty_exponent', type=int, default=4, help="controlling the sensitivity to differences between usert trendy preference and item popularity")
+
+
+
     parser.add_argument('--train_folder', type=str, default="/mnt/isilon/maliousalah/FashionRecommender/data/datasets/train_images", help="Path to training images folder")
 
     return parser.parse_args()
@@ -51,6 +57,9 @@ torch.manual_seed(SEED)
 NUM_CUSTOMERS = args.num_customers             # Number of customers to simulate
 MAX_PURCHASES_PER_CUSTOMER = args.max_purchases_per_customer  # Maximum (average) purchase count per customer
 TOP_K = args.top_k                            # Top K similar items to retrieve per purchased item
+P_max = args.P_max # popularity range
+P_threshold = args.P_threshold # popularity threshold
+Penalty_exponent = args.Penalty_exponent # popularity penality exponent
 
 # List of backbones to try
 BACKBONES = ['resnet50', 'densenet121', 'vgg16']
@@ -287,7 +296,7 @@ def generate_synthetic_purchase_data(df_items: pd.DataFrame, num_customers: int 
 
     synthetic_data = []
     user_trendy_preferences = {user_id: random.random() for user_id in range(1, num_customers + 1)}
-    popularity_dict = {item_id: random.randint(0, 5) for item_id in df_items['item_id'].unique()}
+    popularity_dict = {item_id: random.randint(0, P_max) for item_id in df_items['item_id'].unique()}
 
     for user_id in range(1, num_customers + 1):
         num_purchases = random.randint(1, max_purchases)
@@ -311,7 +320,7 @@ def generate_synthetic_purchase_data(df_items: pd.DataFrame, num_customers: int 
             user_items_pool = df_items[df_items["gender"] == first_gender]
             for _ in range(num_purchases - 1):
                 total_pop = sum(popularity_dict.values())
-                threshold = 0.15 * total_pop
+                threshold = P_threshold * total_pop
                 
                 popular_items = user_items_pool[user_items_pool['item_id'].apply(lambda x: popularity_dict.get(x, 0) >= threshold)]
                 non_popular_items = user_items_pool[user_items_pool['item_id'].apply(lambda x: popularity_dict.get(x, 0) < threshold)]
@@ -339,10 +348,13 @@ def generate_synthetic_purchase_data(df_items: pd.DataFrame, num_customers: int 
     with open('utils/popularity_dict.pkl', 'wb') as f:
         pickle.dump(popularity_dict, f)
     logger.info("Popularity dictionary  saved to 'popularity_dict.pkl'.")
-    return df_synthetic, popularity_dict
+    with open('utils/user_trendy_preferences.pkl', 'wb') as f:
+        pickle.dump(user_trendy_preferences, f)
+    logger.info("User trendy preferences saved to 'user_trendy_preferences.pkl'.")
+    return df_synthetic, popularity_dict, user_trendy_preferences
 
 def compute_recommendations(user_id: int, df_synthetic: pd.DataFrame, df_items: pd.DataFrame,
-                            all_features: dict, popularity_dict: dict, stores: dict,
+                            all_features: dict, popularity_dict: dict, user_trendy_preferences: dict, stores: dict,
                             user_long: float, user_lat: float, top_k: int = TOP_K) -> None:
     """
     Computes and logs recommendations for a given user using different backbones.
@@ -361,8 +373,8 @@ def compute_recommendations(user_id: int, df_synthetic: pd.DataFrame, df_items: 
     # Define weights for relevance score
     w_v = 0.4  # visual similarity
     w_p = 0.2  # popularity
-    w_g = 0.2  # gender match
-    w_c = 0.2  # category similarity
+#    w_g = 0.2  # gender match
+#    w_c = 0.2  # category similarity
 
     for backbone, features_dict in all_features.items():
         logger.info("Recommendations using backbone: %s", backbone)
@@ -406,9 +418,10 @@ def compute_recommendations(user_id: int, df_synthetic: pd.DataFrame, df_items: 
                 gender_score = 1.0 if candidate_gender == purchased_gender else 0.0
                 cat_score = category_similarity(purchased_category, candidate_category)
                 relevance = (w_v * norm_vis_sims[idx] +
-                             w_p * norm_pops[idx] +
-                             w_g * gender_score +
-                             w_c * cat_score)
+                             w_p * (1 - (norm_pops[idx] - user_trendy_preferences[user_id])** Penalty_exponent)
+                             ) #Visual similarity attend to gender match and category similarity
+#                             w_g * gender_score +
+#                             w_c * cat_score)
                 fused_candidates.append((candidate_id, relevance))
             
             fused_candidates.sort(key=lambda x: x[1], reverse=True)
@@ -440,7 +453,7 @@ if __name__ == '__main__':
     logger.info("User location: {'longitude': %.2f, 'latitude': %.2f}", user_longitude, user_latitude)
     
     # Generate synthetic purchase data
-    df_synthetic, popularity_dict = generate_synthetic_purchase_data(df_items)
+    df_synthetic, popularity_dict, user_trendy_preferences = generate_synthetic_purchase_data(df_items)
     
     # Extract features with caching for each backbone
     all_features = {}
@@ -457,5 +470,5 @@ if __name__ == '__main__':
         all_features[backbone] = features_dict
 
     # Compute recommendations for a chosen user (user_id = 1)
-    compute_recommendations(1, df_synthetic, df_items, all_features, popularity_dict, stores,
+    compute_recommendations(1, df_synthetic, df_items, all_features, popularity_dict, user_trendy_preferences, stores,
                             user_longitude, user_latitude)
