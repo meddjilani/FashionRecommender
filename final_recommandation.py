@@ -145,7 +145,7 @@ def extract_features(img_path: pathlib.Path, seg_path: pathlib.Path, model: torc
     # Transform and extract features
     img_tensor = transform(masked_img).unsqueeze(0).to(device)
 
-    img_tensor = transform(img).unsqueeze(0).to(device)  # Shape: [1, 3, 224, 224]
+    #img_tensor = transform(img).unsqueeze(0).to(device)  # Shape: [1, 3, 224, 224]
     with torch.no_grad():
         features = model(img_tensor)
     features = features.squeeze()  # Shape: [feature_dim]
