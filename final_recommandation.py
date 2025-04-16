@@ -24,6 +24,15 @@ import argparse
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Example color codes for the non-garments in the segmentation mask
+NON_GARMENT_COLORS = [
+    (255, 0, 0),    # Red (Hair)
+    (16, 78, 139),  # Blue (Face)
+    (144, 238, 144), # Skin (Green)
+    (0, 0, 0)       # Background (Black)
+]
+
+
 # Set up argument parser
 def parse_args():
     parser = argparse.ArgumentParser(description="Configuration for Fashion Recommender")
@@ -40,6 +49,7 @@ def parse_args():
 
 
     parser.add_argument('--train_folder', type=str, default="/mnt/isilon/maliousalah/FashionRecommender/data/datasets/train_images", help="Path to training images folder")
+    parser.add_argument('--seg_folder', type=str, default="/mnt/isilon/maliousalah/FashionRecommender/data/datasets/segm", help="Path to segmentation images folder")
 
     return parser.parse_args()
 
@@ -73,6 +83,7 @@ logger.info("Using device: %s", DEVICE)
 
 # Data paths
 TRAIN_FOLDER = pathlib.Path(args.train_folder)
+SEG_FOLDER   = pathlib.Path(args.seg_folder)
 ITEMS_DATA_PATH = pathlib.Path("saved_items_data.pkl")
 
 # ------------------------------------------------------------------------------
@@ -122,22 +133,30 @@ def load_image(img_path: pathlib.Path) -> Image.Image:
         logger.error("Error loading image %s: %s", img_path, e)
         raise
 
-def extract_features(img_path: pathlib.Path, model: torch.nn.Module, transform, device: torch.device) -> torch.Tensor:
+def extract_features(img_path: pathlib.Path, seg_path: pathlib.Path, model: torch.nn.Module, transform, device: torch.device) -> torch.Tensor:
     """
-    Loads an image, applies the given transform, and extracts features using the provided model.
-    Returns a 1-D torch tensor (moved to CPU).
+    Extracts features from an image after masking out non-garment regions using color-coded segmentation.
     """
     img = load_image(img_path)
+    seg_img = load_image(str(seg_path))
+    # Apply color-based masking
+    masked_img = apply_color_segmentation(img, seg_img)
+
+    # Transform and extract features
+    img_tensor = transform(masked_img).unsqueeze(0).to(device)
+
     img_tensor = transform(img).unsqueeze(0).to(device)  # Shape: [1, 3, 224, 224]
     with torch.no_grad():
         features = model(img_tensor)
     features = features.squeeze()  # Shape: [feature_dim]
     return features.cpu()
 
-def extract_features_from_folder(folder_path: pathlib.Path, model: torch.nn.Module, transform, device: torch.device, pattern: str):
+def extract_features_from_folder(folder_path: pathlib.Path, seg_path: pathlib.Path, model: torch.nn.Module, transform, 
+                                 device: torch.device, pattern: str):
     """
     Iterates over files in folder_path, parses filenames with the regex pattern,
-    extracts item metadata and computes features using the given model.
+    extracts item metadata and computes features using the given model and its 
+    corresponding segmentation mask.
     
     Returns:
         features_dict: mapping item_id -> feature vector (torch tensor)
@@ -146,20 +165,34 @@ def extract_features_from_folder(folder_path: pathlib.Path, model: torch.nn.Modu
     features_dict = {}
     items_data = []
     filenames = [fname for fname in os.listdir(folder_path) if (folder_path / fname).is_file()]
+    
     for fname in tqdm(filenames, desc="Extracting features"):
         match = re.search(pattern, fname)
         if match:
             item_id = match.group("id")
             gender = match.group("gender")
             cat = match.group("cat")
+            
             items_data.append({
                 'item_id': item_id,
                 'category': cat,
                 'gender': gender
             })
+            
             full_path = folder_path / fname
+            
             if item_id not in features_dict:
-                features_dict[item_id] = extract_features(full_path, model, transform, device)
+                # Construct the segmentation file name.
+                # E.g., from "MEN-Denim-id_00000080-01_7_additional.png" 
+                # to "MEN-Denim-id_00000080-01_7_additional_segm.png".
+                segm_fname = f"{fname.split('.')[0]}_segm.png"
+                segm_path = seg_path / segm_fname
+                
+                # Extract features using the color mask based on segmentation.
+                features_dict[item_id] = extract_features(
+                    full_path, segm_path, model, transform, device
+                )
+                
     return features_dict, items_data
 
 def haversine(lon1: float, lat1: float, lon2: float, lat2: float) -> float:
@@ -173,6 +206,41 @@ def haversine(lon1: float, lat1: float, lon2: float, lat2: float) -> float:
     c = 2 * np.arcsin(np.sqrt(a))
     r = 6371  # Earth radius in kilometers
     return c * r
+
+def apply_color_segmentation(original_img: Image.Image, seg_mask: Image.Image) -> Image.Image:
+    """
+    Keeps only pixels from the original image whose segmentation mask color 
+    is not in the known non-garment color list. Everything else is set to black.
+    
+    Args:
+        original_img (PIL.Image): original RGB image.
+        seg_mask (PIL.Image): segmentation mask in RGB where specific colors 
+                              indicate different body/clothing parts.
+    
+    Returns:
+        PIL.Image: masked RGB image where only garment pixels are kept.
+    """
+    # Convert to NumPy arrays
+    img_np = np.array(original_img)         # shape: (H, W, 3)
+    seg_np = np.array(seg_mask)             # shape: (H, W, 3)
+
+    # Start with a mask of all True (everything is kept)
+    garment_mask = np.ones((seg_np.shape[0], seg_np.shape[1]), dtype=bool)
+
+    # Remove (set False) where the color matches any in NON_GARMENT_COLORS
+    for color in NON_GARMENT_COLORS:
+        color_mask = np.all(seg_np == color, axis=-1)  # shape: (H, W)
+        garment_mask &= ~color_mask
+
+    # Expand to 3D so it can mask RGB image
+    garment_mask_3d = np.stack([garment_mask]*3, axis=-1)
+
+    # Apply the mask
+    masked_img_np = np.where(garment_mask_3d, img_np, 0)
+
+    # Convert back to PIL Image
+    masked_img = Image.fromarray(masked_img_np.astype(np.uint8), mode="RGB")
+    return masked_img
 
 # ------------------------------------------------------------------------------
 # CATEGORY SIMILARITY MATRIX SETUP (Manual Logic)
@@ -256,7 +324,7 @@ def load_or_extract_items_data() -> pd.DataFrame:
     else:
         logger.info("No saved items metadata found. Extracting using backbone: %s", BACKBONES[0])
         model_temp = get_model(BACKBONES[0], DEVICE)
-        features_dict_temp, items_data = extract_features_from_folder(TRAIN_FOLDER, model_temp, transform, DEVICE, PATTERN)
+        features_dict_temp, items_data = extract_features_from_folder(TRAIN_FOLDER, SEG_FOLDER, model_temp, transform, DEVICE, PATTERN)
         torch.save(features_dict_temp, f'saved_features_{BACKBONES[0]}.pt')
         with open(ITEMS_DATA_PATH, 'wb') as f:
             pickle.dump(items_data, f)
@@ -352,6 +420,24 @@ def generate_synthetic_purchase_data(df_items: pd.DataFrame, num_customers: int 
         pickle.dump(user_trendy_preferences, f)
     logger.info("User trendy preferences saved to 'user_trendy_preferences.pkl'.")
     return df_synthetic, popularity_dict, user_trendy_preferences
+
+def load_image(img_path: str) -> Image.Image:
+        return Image.open(img_path).convert("RGB")
+
+def demo_masking():
+    original_path = "/mnt/isilon/maliousalah/FashionRecommender/data/datasets/train_images/MEN-Denim-id_00000080-01_7_additional.png"
+    seg_path = "/mnt/isilon/maliousalah/FashionRecommender/data/datasets/segm/MEN-Denim-id_00000080-01_7_additional_segm.png"
+
+    original_img = load_image(original_path)
+    seg_img = load_image(seg_path)  # load the segmentation mask in RGB
+
+    # Apply the color-based segmentation to keep only garment pixels
+    masked_img = apply_color_segmentation(original_img, seg_img)
+    
+    # Save the masked image to file for debugging/verification
+    save_path = "MEN-Denim-id_00000080-01_7_additional_masked.png"
+    masked_img.save(save_path)
+    print(f"Masked image saved to {save_path}")
 
 def compute_recommendations(user_id: int, df_synthetic: pd.DataFrame, df_items: pd.DataFrame,
                             all_features: dict, popularity_dict: dict, user_trendy_preferences: dict, stores: dict,
@@ -465,10 +551,14 @@ if __name__ == '__main__':
         else:
             logger.info("No saved features found for %s. Extracting features...", backbone)
             model = get_model(backbone, DEVICE)
-            features_dict, _ = extract_features_from_folder(TRAIN_FOLDER, model, transform, DEVICE, PATTERN)
+            features_dict, _ = extract_features_from_folder(TRAIN_FOLDER, SEG_FOLDER, model, transform, DEVICE, PATTERN)
             torch.save(features_dict, features_path)
         all_features[backbone] = features_dict
 
     # Compute recommendations for a chosen user (user_id = 1)
     compute_recommendations(1, df_synthetic, df_items, all_features, popularity_dict, user_trendy_preferences, stores,
                             user_longitude, user_latitude)
+    
+    
+
+    #demo_masking()
