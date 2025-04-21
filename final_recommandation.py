@@ -454,7 +454,7 @@ def compute_recommendations(user_id: int, df_synthetic: pd.DataFrame, df_items: 
     metadata_map = df_items.drop_duplicates(subset=['item_id']).set_index('item_id').to_dict('index')
     
     user_purchased_ids = set(user_purchases['item_id'].unique())
-    user_gender = user_purchases[0]['user_gender']
+    user_gender = metadata_map[next(iter(user_purchased_ids))]['gender']
 
     # Define weights for relevance score
     w_v = 0.4  # visual similarity
