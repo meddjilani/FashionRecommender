@@ -461,12 +461,12 @@ def compute_recommendations(user_id: int, df_synthetic: pd.DataFrame, df_items: 
     w_p = 0.2  # popularity
 #    w_g = 0.2  # gender match
 #    w_c = 0.2  # category similarity
-
+    results_list_per_customer = []
     for backbone, features_dict in all_features.items():
         logger.info("Recommendations using backbone: %s", backbone)
         candidate_items = [
             item for item in features_dict.keys() 
-            if item not in user_purchased_ids and metadata_map[item]['gender'] == user_gender
+            if item not in user_purchased_ids #and metadata_map[item]['gender'] == user_gender
         ]
         recommendations = {}
         
