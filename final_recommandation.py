@@ -39,10 +39,10 @@ def parse_args():
 
     # Add arguments for configurable parameters
     parser.add_argument('--seed', type=int, default=42, help="Random seed for reproducibility")
-    parser.add_argument('--num_customers', type=int, default=50, help="Number of customers to simulate")
-    parser.add_argument('--max_purchases_per_customer', type=int, default=5, help="Maximum (average) purchase count per customer")
-    parser.add_argument('--top_k', type=int, default=5, help="Top K similar items to retrieve per purchased item")
-    parser.add_argument('--P_max', type=int, default=100, help="Maximum number of purchases for a given item")
+    parser.add_argument('--num_customers', type=int, default=15, help="Number of customers to simulate")
+    parser.add_argument('--max_purchases_per_customer', type=int, default=3, help="Maximum (average) purchase count per customer")
+    parser.add_argument('--top_k', type=int, default=10, help="Top K similar items to retrieve per purchased item")
+    parser.add_argument('--P_max', type=int, default=100, help="Maximum number of purchases for a given item at initialization")
     parser.add_argument('--P_threshold', type=int, default=0.15, help="threshold to divide popular items from non popular items")
     parser.add_argument('--Penalty_exponent', type=int, default=4, help="controlling the sensitivity to differences between usert trendy preference and item popularity")
 
@@ -84,7 +84,7 @@ logger.info("Using device: %s", DEVICE)
 # Data paths
 TRAIN_FOLDER = pathlib.Path(args.train_folder)
 SEG_FOLDER   = pathlib.Path(args.seg_folder)
-ITEMS_DATA_PATH = pathlib.Path("saved_items_data.pkl")
+ITEMS_DATA_PATH = pathlib.Path("utils/saved_items_data.pkl")
 
 # ------------------------------------------------------------------------------
 # HELPER FUNCTIONS
@@ -325,7 +325,7 @@ def load_or_extract_items_data() -> pd.DataFrame:
         logger.info("No saved items metadata found. Extracting using backbone: %s", BACKBONES[0])
         model_temp = get_model(BACKBONES[0], DEVICE)
         features_dict_temp, items_data = extract_features_from_folder(TRAIN_FOLDER, SEG_FOLDER, model_temp, transform, DEVICE, PATTERN)
-        torch.save(features_dict_temp, f'saved_features_{BACKBONES[0]}.pt')
+        torch.save(features_dict_temp, f'utils/saved_features_{BACKBONES[0]}.pt')
         with open(ITEMS_DATA_PATH, 'wb') as f:
             pickle.dump(items_data, f)
         df_items = pd.DataFrame(items_data).drop_duplicates().reset_index(drop=True)
@@ -439,6 +439,14 @@ def demo_masking():
     masked_img.save(save_path)
     print(f"Masked image saved to {save_path}")
 
+def min_max_normalize_key(d, key):
+    values = list(d.values())
+    min_val = min(values)
+    max_val = max(values)
+    if max_val == min_val:
+        return 0.0
+    return (d[key] - min_val) / (max_val - min_val)
+
 def compute_recommendations(user_id: int, df_synthetic: pd.DataFrame, df_items: pd.DataFrame,
                             all_features: dict, popularity_dict: dict, user_trendy_preferences: dict, stores: dict,
                             user_long: float, user_lat: float, top_k: int = TOP_K) -> None:
@@ -456,6 +464,10 @@ def compute_recommendations(user_id: int, df_synthetic: pd.DataFrame, df_items: 
     user_purchased_ids = set(user_purchases['item_id'].unique())
     user_gender = metadata_map[next(iter(user_purchased_ids))]['gender']
 
+    with open('utils/user_trendy_preferences.pkl', 'rb') as f:
+        user_trendy_preferences = pickle.load(f)
+    with open('utils/popularity_dict.pkl', 'rb') as f:
+            popularity_dict = pickle.load(f)
     # Define weights for relevance score
     w_v = 0.4  # visual similarity
     w_p = 0.2  # popularity
@@ -492,11 +504,14 @@ def compute_recommendations(user_id: int, df_synthetic: pd.DataFrame, df_items: 
                 if max_val == min_val:
                     return [1.0 for _ in values]
                 return [(v - min_val) / (max_val - min_val) for v in values]
-            
+
+
+            # could be change to norm over the entire set and not only candidate
             vis_sims = [cand[1] for cand in candidates]
             pops = [cand[2] for cand in candidates]
             norm_vis_sims = min_max_normalize(vis_sims)
             norm_pops = min_max_normalize(pops)
+            
             
             fused_candidates = []
             for idx, candidate_info in enumerate(candidates):
@@ -522,7 +537,11 @@ def compute_recommendations(user_id: int, df_synthetic: pd.DataFrame, df_items: 
                 distance = haversine(user_long, user_lat, store_info['longitude'], store_info['latitude'])
                 logger.info("   Candidate: %s | Relevance: %.4f | Store: %d at %s | Distance: %.2f km",
                             candidate, relevance, store_id, store_info, distance)
+                row = {'user_id':user_id, 'backbone':backbone, 'purchased_item':str(item)+" "+metadata_map[item]['category'], 'recommended_item': str(candidate)+" "+(metadata_map[candidate]['category']), 'relevance': relevance, 'category_similarity':category_similarity(metadata_map[item]['category'], metadata_map[candidate]['category']),'user_trendy_preferences': user_trendy_preferences[user_id], 'recommended_item_popularity': min_max_normalize_key(popularity_dict,candidate), 'user_gender':user_gender, 'recommended_item_gender': metadata_map[item]['gender']}
+                results_list_per_customer.append(row)
 
+
+    return results_list_per_customer
 
 # ------------------------------------------------------------------------------
 # MAIN EXECUTION
@@ -544,7 +563,7 @@ if __name__ == '__main__':
     # Extract features with caching for each backbone
     all_features = {}
     for backbone in BACKBONES:
-        features_path = pathlib.Path(f'saved_features_{backbone}.pt')
+        features_path = pathlib.Path(f'utils/saved_features_{backbone}.pt')
         if features_path.exists():
             logger.info("Loading pre-extracted features for %s from disk...", backbone)
             features_dict = torch.load(features_path)
@@ -555,10 +574,23 @@ if __name__ == '__main__':
             torch.save(features_dict, features_path)
         all_features[backbone] = features_dict
 
-    # Compute recommendations for a chosen user (user_id = 1)
-    compute_recommendations(1, df_synthetic, df_items, all_features, popularity_dict, user_trendy_preferences, stores,
+    results_list = []
+    for customer in range(1, NUM_CUSTOMERS + 1):
+        results_list_per_customer = compute_recommendations(customer, df_synthetic, df_items, all_features, popularity_dict, user_trendy_preferences, stores,
                             user_longitude, user_latitude)
-    
-    
+        results_list.extend(results_list_per_customer)
+        
+    results_df = pd.DataFrame(results_list)
+
+    # Construct filename using args
+    filename = (
+        f"df{args.seed}_cust{args.num_customers}_pur{args.max_purchases_per_customer}_"
+        f"Pthresh{args.P_threshold}_PenExp{args.Penalty_exponent}_Pmax{args.P_max}_topk{args.top_k}.csv"
+    )
+
+    os.makedirs('results', exist_ok=True)
+
+    # Save the DataFrame to a CSV file
+    results_df.to_csv(os.path.join('results', filename), index=True)
 
     #demo_masking()
