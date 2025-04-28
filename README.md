@@ -85,7 +85,7 @@ All parameters can be configured via command-line flags or environment variables
 
 Run the pipeline with:
 ```bash
-python main.py --num_customers 10 --top_k 5
+python final_recommandation.py --num_customers 10 --top_k 5
 ```
 
 ---
